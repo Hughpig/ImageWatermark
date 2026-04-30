@@ -1,0 +1,15 @@
+# 虚拟环境
+venv/
+.env
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 大作业的数据文件（只上传代码，不上传海量大图）
+data/output/*
+experiments/plots/*
+
+# 系统文件
+.DS_Store
+.vscode/
