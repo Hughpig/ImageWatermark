@@ -24,18 +24,14 @@ def embed_watermark(image:np.ndarray, watermark:np.ndarray,delta:float=10.0)->np
     return flat_image.reshape(image_copy.shape)
 
 def extract_watermark(watermarked_image: np.ndarray, wm_len: int, delta: float = 10.0) -> np.ndarray:
-    # 逻辑修改：不再使用 len(watermark)，直接使用传入的长度数值
     flat_watermarked_image = watermarked_image.flatten()
-    
     # 检查容量
     if wm_len > len(flat_watermarked_image):
         raise ValueError("Requested watermark length exceeds image capacity.")
-
     # 取出对应的系数
     target_coeffs = flat_watermarked_image[:wm_len]
 
     # --- QIM 盲提取判定逻辑 ---
-    # 不要用除法逆运算，要用量化索引判定
     quantized_idx = np.round(target_coeffs / delta)
     extracted_watermark = np.mod(quantized_idx, 2).astype(np.uint8)
     
