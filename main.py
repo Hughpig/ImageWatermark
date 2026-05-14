@@ -3,9 +3,9 @@ import numpy as np
 import cv2
 import os
 
-# 导入你编写的三大核心模块
+# 导入三大核心模块 (增加 DCT 相关的导入)
 from core.protect import arnold_transform, inv_arnold_transform
-from core.transform import apply_dwt, apply_idwt
+from core.transform import apply_dwt, apply_idwt, apply_dct, apply_idct, apply_fft, apply_ifft
 from core.watermark import embed_watermark, extract_watermark
 
 def save_debug_img(filename, img, debug_mode):
@@ -15,23 +15,22 @@ def save_debug_img(filename, img, debug_mode):
         print(f"  [Debug] 已保存中间图像: {filename}")
 
 def main():
-    parser = argparse.ArgumentParser(description="图片盲水印系统 V2.0 (彩色 YCbCr + Debug)")
-    parser.add_argument("--action", choices=["embed", "extract"], required=True, help="操作模式: embed 或 extract")
-    parser.add_argument("--host", type=str, required=True, help="载体大图的路径 (彩色图)")
-    parser.add_argument("--watermark", type=str, help="水印小图的路径 (仅嵌入时需要)")
-    parser.add_argument("--output", type=str, default="output.png", help="输出结果的保存路径")
+    parser = argparse.ArgumentParser(description="图片盲水印系统 (灰度图 DWT/DCT 适配多模态路由)")
+    parser.add_argument("--action", choices=["embed", "extract"], required=True, help="操作模式")
+    parser.add_argument("--method", choices=["dwt", "dct", "fft"], default="dwt", help="变换算法")
+    parser.add_argument("--host", type=str, required=True, help="载体大图的路径")
+    parser.add_argument("--watermark", type=str, help="水印小图的路径")
+    parser.add_argument("--output", type=str, default="output.png", help="输出路径")
     
-    # 系统安全与算法参数
-    parser.add_argument("--key", type=int, default=10, help="Arnold 置乱密钥")
-    parser.add_argument("--delta", type=float, default=20.0, help="QIM 量化步长")
-    parser.add_argument("--wm_size", type=int, default=64, help="水印图像的尺寸 N (默认 64)")
-    
-    # Debug 开关
-    parser.add_argument("--debug", action="store_true", help="开启 Debug 模式，输出中间变量并保存过程图")
+    # 核心参数默认值
+    parser.add_argument("--key", type=int, default=12, help="Arnold 置乱密钥")
+    parser.add_argument("--delta", type=float, default=25.0, help="QIM 量化步长")
+    parser.add_argument("--wm_size", type=int, default=64, help="水印尺寸 N (默认 64)")
+    parser.add_argument("--debug", action="store_true", help="开启 Debug 模式")
 
     args = parser.parse_args()
 
-    # 确保输出目录和 debug 目录存在
+    # 确保目录存在
     out_dir = os.path.dirname(args.output)
     if out_dir and not os.path.exists(out_dir):
         os.makedirs(out_dir)
@@ -39,113 +38,122 @@ def main():
         os.makedirs("debug_output")
 
     if args.action == "embed":
-        print(">>> 启动彩色水印嵌入流水线...")
+        print(f">>> 启动稳定版 {args.method.upper()} 彩色水印嵌入 (B 通道)...")
         if not args.watermark:
-            print("错误：嵌入模式必须提供 --watermark 参数")
+            print("错误：嵌入模式必须提供 --watermark")
             return
             
-        # 1. 读取图像 (彩色模式)
-        host_img = cv2.imread(args.host)
-        wm_img = cv2.imread(args.watermark, cv2.IMREAD_GRAYSCALE) # 水印选择单通道黑白
+        # 1. 读取图像：宿主图读取为彩色，水印图读取为灰度
+        host_img = cv2.imread(args.host) # 彩色读取
+        wm_img = cv2.imread(args.watermark, cv2.IMREAD_GRAYSCALE) 
         
         if host_img is None or wm_img is None:
-            print("错误：无法读取载体或水印图像。")
+            print("错误：无法读取图像。")
             return
 
-        # 2. 预处理水印
+        # 2. 拆分通道，仅对 Blue (B) 通道进行操作
+        B, G, R = cv2.split(host_img)
+
+        # [DCT 安全检查] OpenCV DCT 要求图像尺寸必须为偶数
+        if args.method == 'dct':
+            h, w = B.shape
+            if h % 2 != 0 or w % 2 != 0:
+                B = B[:h-(h%2), :w-(w%2)]
+                G = G[:h-(h%2), :w-(w%2)]
+                R = R[:h-(h%2), :w-(w%2)]
+                print(f"  [提示] DCT 要求偶数尺寸，图像已自动裁剪为: {B.shape}")
+
+        # 3. 水印二值化
         wm_img = cv2.resize(wm_img, (args.wm_size, args.wm_size))
         _, wm_bin = cv2.threshold(wm_img, 127, 1, cv2.THRESH_BINARY)
         save_debug_img("debug_output/01_wm_binary.png", wm_bin * 255, args.debug)
         
-        # 3. [Protect 层] Arnold 置乱
-        print(f"[*] 正在进行 Arnold 置乱加密 (Key={args.key})...")
+        # 4. [Protect 层] Arnold
+        print(f"[*] 正在进行 Arnold 加密 (Key={args.key})...")
         wm_encrypted = arnold_transform(wm_bin, args.key)
         wm_bits = wm_encrypted.flatten()
         save_debug_img("debug_output/02_wm_arnold.png", wm_encrypted * 255, args.debug)
-        
-        if args.debug:
-            print(f"  [Debug] 水印尺寸: {wm_img.shape}, 展平后比特数: {len(wm_bits)}")
-            print(f"  [Debug] 前 10 个水印比特: {wm_bits[:10]}")
 
-        # 4. 色彩空间转换 (BGR -> YCbCr)
-        img_yuv = cv2.cvtColor(host_img, cv2.COLOR_BGR2YCrCb)
-        Y, Cr, Cb = cv2.split(img_yuv)
-        
-        # 5. [Transform 层] 仅对 Y (亮度) 分量进行 DWT
-        print("[*] 正在对载体 Y 分量进行 DWT 分解...")
-        coeffs = apply_dwt(Y, wavelet='haar')
-        LL, details = coeffs[0], coeffs[1]
-        
-        if args.debug:
-            print(f"  [Debug] 原图 Y 分量尺寸: {Y.shape}")
-            print(f"  [Debug] DWT LL 子带尺寸: {LL.shape}, 容量: {LL.size} 像素")
-            print(f"  [Debug] 嵌入前 LL 前 5 个系数: {LL.flatten()[:5]}")
-        
-        # 6. [Watermark 层] QIM 嵌入
-        print(f"[*] 正在将比特流嵌入 LL 子带 (Delta={args.delta})...")
-        LL_stego = embed_watermark(LL, wm_bits, args.delta)
+        # 5. [Transform 层] 频域分解 (针对 B 通道)
+        print(f"[*] 正在对载体 B 通道进行 {args.method.upper()} 分解...")
+        if args.method == 'dwt':
+            coeffs = apply_dwt(B, wavelet='haar')
+        elif args.method == 'dct':
+            coeffs = apply_dct(B)
+        elif args.method == 'fft':
+            coeffs = apply_fft(B)
         
         if args.debug:
-            print(f"  [Debug] 嵌入后 LL 前 5 个系数: {LL_stego.flatten()[:5]}")
-            # 可视化 LL 频带的变化 (归一化到 0-255)
-            LL_vis = cv2.normalize(LL, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            LL_stego_vis = cv2.normalize(LL_stego, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            save_debug_img("debug_output/03_LL_original.png", LL_vis, args.debug)
-            save_debug_img("debug_output/04_LL_stego.png", LL_stego_vis, args.debug)
-
-        # 7. [Transform 层] IDWT 重构 Y 分量
-        print("[*] 正在执行 IDWT 重构...")
-        Y_stego = apply_idwt((LL_stego, details), wavelet='haar')
+            print(f"  [Debug] B 通道尺寸: {B.shape}")
+            if args.method == 'dwt':
+                print(f"  [Debug] {args.method.upper()} LL 子带尺寸: {coeffs[0].shape}")
+            else:
+                print(f"  [Debug] {args.method.upper()} 系数矩阵尺寸: {coeffs.shape}")
         
-        # 8. 合并回彩色图像 (Y_stego + 原来的 Cr, Cb)
-        stego_yuv = cv2.merge([Y_stego, Cr, Cb])
-        stego_img = cv2.cvtColor(stego_yuv, cv2.COLOR_YCrCb2BGR)
+        # 6. [Watermark 层] QIM 嵌入 (传入完整 coeffs 和 method)
+        print(f"[*] 正在将比特流嵌入频域 (Delta={args.delta})...")
+        coeffs_stego = embed_watermark(coeffs, wm_bits, method=args.method, delta=args.delta)
+        
+        # 7. [Transform 层] 频域重构
+        print(f"[*] 正在执行 I{args.method.upper()} 重构...")
+        if args.method == 'dwt':
+            B_stego = apply_idwt(coeffs_stego, wavelet='haar')
+        elif args.method == 'dct':
+            B_stego = apply_idct(coeffs_stego)
+        elif args.method == 'fft':
+            B_stego = apply_ifft(coeffs_stego)
+        
+        # 8. 合并通道回彩色图像 (B_stego + 原始 G 和 R)
+        stego_img = cv2.merge([B_stego, G, R])
         
         cv2.imwrite(args.output, stego_img)
-        print(f">>> 嵌入完成！彩色含密图像已保存至: {args.output}")
+        print(f">>> 嵌入完成！彩色含密图像: {args.output}")
 
 
     elif args.action == "extract":
-        print(">>> 启动盲水印提取程序...")
+        print(f">>> 启动稳定版 {args.method.upper()} 彩色盲提取 (B 通道)...")
         
         # 1. 读取彩色含密图像
         stego_img = cv2.imread(args.host)
         if stego_img is None:
             print("错误：无法读取含密图像。")
             return
+
+        # 2. 提取 B 通道
+        B_stego, _, _ = cv2.split(stego_img)
+
+        # [DCT 安全检查]
+        if args.method == 'dct':
+            h, w = B_stego.shape
+            if h % 2 != 0 or w % 2 != 0:
+                B_stego = B_stego[:h-(h%2), :w-(w%2)]
             
-        # 2. 提取 Y 分量
-        img_yuv = cv2.cvtColor(stego_img, cv2.COLOR_BGR2YCrCb)
-        Y_stego, _, _ = cv2.split(img_yuv)
+        # 3. [Transform 层] 频域分解 (针对 B 通道)
+        print(f"[*] 正在进行 {args.method.upper()} 分解...")
+        if args.method == 'dwt':
+            coeffs = apply_dwt(B_stego, wavelet='haar')
+        elif args.method == 'dct':
+            coeffs = apply_dct(B_stego)
+        elif args.method == 'fft':
+            coeffs = apply_fft(B_stego)
         
-        # 3. [Transform 层] DWT 分解拿到 LL
-        print("[*] 正在对 Y 分量进行 DWT 分解...")
-        coeffs = apply_dwt(Y_stego, wavelet='haar')
-        LL_stego = coeffs[0]
-        
-        if args.debug:
-            print(f"  [Debug] 提取到的 LL 子带尺寸: {LL_stego.shape}")
-            print(f"  [Debug] 准备盲提取的 LL 前 5 个系数: {LL_stego.flatten()[:5]}")
-        
-        # 4. [Watermark 层] QIM 盲提取
+        # 4. [Watermark 层] QIM 提取 (传入完整 coeffs 和 method)
         total_bits = args.wm_size * args.wm_size
         print(f"[*] 正在盲提取比特流 (Delta={args.delta}, 长度={total_bits})...")
-        extracted_bits = extract_watermark(LL_stego, wm_len=total_bits, delta=args.delta)
+        extracted_bits = extract_watermark(coeffs, wm_len=total_bits, method=args.method, delta=args.delta)
         
-        if args.debug:
-            print(f"  [Debug] 提取出的前 10 个比特: {extracted_bits[:10]}")
-        
-        # 5. 重新塑形并保存中间态
+        # 4. 重新塑形
         wm_encrypted_extracted = extracted_bits.reshape((args.wm_size, args.wm_size))
         save_debug_img("debug_output/05_extracted_arnold.png", wm_encrypted_extracted * 255, args.debug)
         
-        # 6. [Protect 层] Arnold 逆变换
-        print(f"[*] 正在进行 Arnold 逆变换恢复视觉图像 (Key={args.key})...")
+        # 5. [Protect 层] 逆 Arnold
+        print(f"[*] 正在逆 Arnold 恢复视觉图像 (Key={args.key})...")
         wm_decrypted = inv_arnold_transform(wm_encrypted_extracted, args.key)
         final_wm_img = wm_decrypted * 255
+        _, final_wm_img = cv2.threshold(final_wm_img.astype(np.uint8), 127, 255, cv2.THRESH_BINARY)
         
         cv2.imwrite(args.output, final_wm_img)
-        print(f">>> 提取完成！提取出的水印已保存至: {args.output}")
+        print(f">>> 提取完成！提取的水印: {args.output}")
 
 if __name__ == "__main__":
     main()
