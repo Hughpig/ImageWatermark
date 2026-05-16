@@ -62,3 +62,7 @@ python main.py --action extract --method dwt --host stego.png --output extracted
 ### 许可证
 
 本项目采用 MIT 许可证开源。
+
+### 特别鸣谢
+
+本项目作为上海交通大学“学森挑战计划”的课程大作业，在此对于上海交通大学老师的辛勤付出与培养表示由衷的感谢。
